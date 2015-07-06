@@ -1,233 +1,422 @@
-"""Module for manipulating SMPTE timecode. Supports 60, 59.94, 50, 30, 29.97, 25, 24, 23.98 frame rates in drop and non-drop where applicable, and milliseconds. It also supports
-operator overloading for addition, subtraction, multiplication, and division.
+#!-*- coding: utf-8 -*-
+# The MIT License (MIT)
+#
+# Copyright (c) 2014 Joshua Banton and PyTimeCode developers
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+import re
 
-iter_return sets the format that iterations return, the options are "tc" for a timecode string,
-"frames" for a int total frames, and "tc_tuple" for a tuple of ints in the following format,
-(hours, minutes, seconds, frames).
-
-Notes: *There is a 24 hour SMPTE Timecode limit, so if your time exceeds that limit, it will roll over.
-       *2 PyTimeCode objects of the same frame rate is the only supported way to combine PyTimeCode objects, 
-            for example adding them together.
-
-Copyright Joshua Banton"""
+__version__ = '0.3.1'
 
 
-class PyTimeCode(object):
-    def __init__(self, framerate, start_timecode = None, start_seconds=None, frames = None, drop_frame = False, iter_return="tc"):
-        """frame rate can be string '60', '59.94', '50', '30', '29.97', '25', '24', '23.98', or 'ms'"""
-        self.framerate = framerate
-        self.int_framerate = self.set_int_framerate()
-        self.drop_frame = drop_frame
-        self.iter_return = iter_return
-        self.hrs = None
-        self.mins = None
-        self.secs = None
-        self.frs = None
+format_re = re.compile(r'%(?P<pad>\d+)?(?P<var>\w+)')
+
+global_fmt = '%02H:%02M:%02S:%02f'
+ffmpeg_fmt = '%02H:%02M:%02S.%05m'
+
+
+class Timecode(object):
+    def __init__(self, framerate, start_timecode=None, start_seconds=None,
+                 frames=None):
+        """The main timecode class.
+
+        Does all the calculation over frames, so the main data it holds is
+        frames, then when required it converts the frames to a timecode by
+        using the frame rate setting.
+
+        :param str framerate: The frame rate of the Timecode instance. It
+          should be one of ['23.98', '24', '25', '29.97', '30', '50', '59.94',
+          '60', 'ms'] where "ms" equals to 1000 fps. Can not be skipped.
+          Setting the framerate will automatically set the :attr:`.drop_frame`
+          attribute to correct value.
+        :param start_timecode: The start timecode. Use this to be able to
+          set the timecode of this Timecode instance. It can be skipped and
+          then the frames attribute will define the timecode, and if it is also
+          skipped then the start_second attribute will define the start
+          timecode, and if start_seconds is also skipped then the default value
+          of '00:00:00:00' will be used.
+        :type start_timecode: str or None
+        :param start_seconds: A float or integer value showing the seconds.
+        :param int frames: Timecode objects can be initialized with an
+          integer number showing the total frames.
+        """
+        self.drop_frame = False
+        self.int_framerate = -1
+        self.framerate = self._validate_framerate(framerate)
+
         self.frames = None
+
+        # attribute override order
+        # start_timecode > frames > start_seconds
         if start_timecode:
-            self.set_timecode(start_timecode)
-            self.tc_to_frames()
-        elif not frames==None:#because 0==False, and frames can be 0
-            self.frames = int(frames)
-            self.frames_to_tc(frame_only=True)
-        elif not start_seconds==None:#because 0==False, and frames can be 0
-            start_timecode = self.float_to_tc(start_seconds)
-            #self.set_timecode(start_timecode)
-            self.tc_to_frames()
-        self.__check_drop_frame__()
-        
-    def set_timecode(self, timecode):
-        """sets timecode to argument 'timecode'"""
-        self.hrs, self.mins, self.secs, self.frs = self.parse_timecode(timecode)
-        
-    def float_to_tc(self, seconds):
-        self.frames = int(seconds * self.int_framerate)
-        return self.frames_to_tc()
-        
-    def tc_to_frames(self):
-        """converts corrent timecode to frames"""
-        frames = int((((self.hrs * 3600) + (self.mins * 60) + self.secs) * float(self.framerate)) + self.frs)
-        if self.drop_frame:
-            del_frames = self.calc_drop_frames()
-            frames = frames - del_frames
-        self.frames = frames
-        
-    def frames_to_tc(self, frame_only=False):
-        """converts frames back to timecode, if frame_only==True, it needs to
-        calculate the drop frames without looking at self.hrs, etc."""
-        if self.drop_frame:
-            drop_frames = self.calc_drop_frames(frame_only)
-            frames = self.frames + drop_frames
+            self.frames = self.tc_to_frames(start_timecode)
         else:
-            frames = self.frames
-        self.hrs = frames/(3600*self.int_framerate)
-        #check to see if hours => 24. SMPTE Timecode only goes to 24 hours
-        if self.hrs > 23:
-            self.hrs = self.hrs % 24
-            frames = frames - (24 * 3600 * self.int_framerate)
-        self.mins = (frames%(3600*self.int_framerate))/(60*self.int_framerate)
-        self.secs = ((frames%(3600*self.int_framerate))%(60*self.int_framerate))/self.int_framerate
-        self.frs = ((frames%(3600*self.int_framerate))%(60*self.int_framerate))%self.int_framerate
-        if self.drop_frame:
-            if self.frs == 0 and (self.mins % 10): #tests to see if frames is 0 and if minutes is not an even 10, 20, 30, etc
-                if self.framerate == '59.94':
-                    self.frs = 4
-                elif self.framerate == '29.97':
-                    self.frs = 2
-        self.tc_to_frames()
-     
-    def calc_drop_frames(self, frame_only=False):
-        if frame_only:
-            hours = self.frames/(3600*self.int_framerate)
-            mins = (self.frames%(3600*self.int_framerate))/(60*self.int_framerate)
-            if mins%10: #if the minutes is not a multiple of 10, there needs to be one more drop frame unit, 2 or 4
-                extra = 1
+            if frames is not None:  # because 0==False, and frames can be 0
+                self.frames = frames
+            elif start_seconds is not None:
+                self.frames = self.float_to_tc(start_seconds)
             else:
-                extra = 0
-            if self.framerate == '59.94':
-                return (hours * 6 * 36) + ((mins/10) *36) + (mins%10 * 4) + (extra * 4)
-            elif self.framerate == '29.97':
-                return (hours * 6 * 18) + ((mins/10) *18) + (mins%10 * 2) + (extra * 2)
-        elif self.framerate == '59.94':
-            return (self.hrs * 6 * 36) + ((self.mins/10) *36) + (self.mins%10 * 4)
-        elif self.framerate == '29.97':
-            return (self.hrs * 6 * 18) + ((self.mins/10) *18) + (self.mins%10 * 2)
+                # use default value of 00:00:00:00
+                self.frames = self.tc_to_frames('00:00:00:00')
+
+    def _validate_framerate(self, framerate):
+        """validates the given framerate value
+        """
+        # set the int_frame_rate
+        if framerate == '29.97':
+            self.int_framerate = 30
+            self.drop_frame = True
+        elif framerate == '59.94':
+            self.int_framerate = 60
+            self.drop_frame = True
+        elif framerate == '23.98':
+            self.int_framerate = 24
+        elif framerate == 'ms':
+            self.int_framerate = 1000
+            framerate = 1000
+        elif framerate == 'frames':
+            self.int_framerate = 1
         else:
-            raise PyTimeCodeError('Drop frame with '+self.framerate+'fps not supported, only 29.97 & 59.94.') 
-     
-    def set_int_framerate(self):
-        if self.framerate == '29.97':
-            int_framerate = 30
-        elif self.framerate == '59.94':
-            int_framerate = 60
-        elif self.framerate == '23.98':
-            int_framerate = 24
-        elif self.framerate == 'ms':
-            int_framerate = 1000
-        elif self.framerate == 'frames':
-            int_framerate = 1
+            self.int_framerate = int(framerate)
+        return framerate
+
+    def set_timecode(self, timecode):
+        """Sets the frames by using the given timecode
+        """
+        self.frames = self.tc_to_frames(timecode)
+
+    def float_to_tc(self, seconds):
+        """set the frames by using the given seconds
+        """
+        return int(seconds * self.int_framerate)
+
+    def tc_to_frames(self, timecode):
+        """Converts the given timecode to frames
+        """
+        hours, minutes, seconds, frames = map(int, timecode.split(':'))
+
+        ffps = float(self.framerate)
+
+        if self.drop_frame:
+            # Number of drop frames is 6% of framerate rounded to nearest
+            # integer
+            drop_frames = int(round(ffps * .066666))
         else:
-            int_framerate = int(self.framerate)
-        return int_framerate
-        
-    def parse_timecode(self, timecode):
-        """parses timecode string frames '00:00:00:00' or '00:00:00;00' or milliseconds '00:00:00:000'"""
-        if len(timecode) == 11:
-            frs = int(timecode[9:11])
-        elif len(timecode) == 12 and self.framerate == 'ms':
-            frs = int(timecode[9:12])
+            drop_frames = 0
+
+        # We don't need the exact framerate anymore, we just need it rounded to
+        # nearest integer
+        ifps = self.int_framerate
+
+        # Number of frames per hour (non-drop)
+        hour_frames = ifps * 60 * 60
+
+        # Number of frames per minute (non-drop)
+        minute_frames = ifps * 60
+
+        # Total number of minutes
+        total_minutes = (60 * hours) + minutes
+
+        frame_number = \
+            ((hour_frames * hours) + (minute_frames * minutes) +
+             (ifps * seconds) + frames) - \
+            (drop_frames * (total_minutes - (total_minutes // 10)))
+
+        frames = frame_number + 1
+
+        return frames
+
+    def frames_to_tc(self, frames):
+        """Converts frames back to timecode
+
+        :returns str: the string representation of the current time code
+        """
+        ffps = float(self.framerate)
+
+        if self.drop_frame:
+            # Number of frames to drop on the minute marks is the nearest
+            # integer to 6% of the framerate
+            drop_frames = int(round(ffps * .066666))
         else:
-            raise PyTimeCodeError('Timecode string parsing error. ' + timecode)
-        hrs = int(timecode[0:2])
-        mins = int(timecode[3:5])
-        secs = int(timecode[6:8])
+            drop_frames = 0
+
+        # Number of frames in an hour
+        frames_per_hour = int(round(ffps * 60 * 60))
+        # Number of frames in a day - timecode rolls over after 24 hours
+        frames_per_24_hours = frames_per_hour * 24
+        # Number of frames per ten minutes
+        frames_per_10_minutes = int(round(ffps * 60 * 10))
+        # Number of frames per minute is the round of the framerate * 60 minus
+        # the number of dropped frames
+        frames_per_minute = int(round(ffps)*60) - drop_frames
+
+        frame_number = frames - 1
+
+        if frame_number < 0:
+            # Negative time. Add 24 hours.
+            frame_number += frames_per_24_hours
+
+        # If frame_number is greater than 24 hrs, next operation will rollover
+        # clock
+        frame_number %= frames_per_24_hours
+
+        if self.drop_frame:
+            d = frame_number // frames_per_10_minutes
+            m = frame_number % frames_per_10_minutes
+            if m > drop_frames:
+                frame_number += (drop_frames * 9 * d) + \
+                    drop_frames * ((m - drop_frames) // frames_per_minute)
+            else:
+                frame_number += drop_frames * 9 * d
+
+        ifps = self.int_framerate
+        frs = frame_number % ifps
+        secs = (frame_number // ifps) % 60
+        mins = ((frame_number // ifps) // 60) % 60
+        hrs = (((frame_number // ifps) // 60) // 60)
+
         return hrs, mins, secs, frs
-        
-    def make_timecode(self):
-        self.frames_to_tc()
-        hr_str = self.__set_time_str(self.hrs)
-        min_str = self.__set_time_str(self.mins)
-        sec_str = self.__set_time_str(self.secs)
-        frame_str = self.__set_time_str(self.frs)
-        timecode_str = "%s:%s:%s:%s" % (hr_str, min_str, sec_str, frame_str)
-        return timecode_str
-        
-    def __set_time_str(self, time):
-        if len(str(time)) > 1:
-            time_str = str(time)
-        else:
-            time_str = "0%s" % time
-        return time_str
-        
+
+    @classmethod
+    def parse_timecode(cls, timecode):
+        """parses timecode string frames '00:00:00:00' or '00:00:00;00' or
+        milliseconds '00:00:00:000'
+        """
+        bfr = timecode.replace(';', ':').replace('.', ':').split(':')
+        hrs = int(bfr[0])
+        mins = int(bfr[1])
+        secs = int(bfr[2])
+        frs = int(bfr[3])
+        return hrs, mins, secs, frs
+
     def __iter__(self):
         return self
-        
+
     def next(self):
         self.add_frames(1)
-        return self.__return_item__()
-        
+        return self
+
     def back(self):
         self.sub_frames(1)
-        return self.__return_item__()
-                
-    def __check_drop_frame__(self):
-        if not self.drop_frame:
-            return True
-        elif self.framerate == "29.97" or self.framerate == "59.94":
-            return True
-        else:
-            raise PyTimeCodeError('Drop frame with '+self.framerate+'fps not supported, only 29.97 & 59.94.')
-    
-    def __return_item__(self):
-        if self.iter_return == 'tc':
-            return self.make_timecode()
-        elif self.iter_return == 'frames':
-            return self.frames
-        elif self.iter_return == 'tc_tuple':
-            return (self.hrs, self.mins, self.secs, self.frs)
-    
+        return self
+
     def add_frames(self, frames):
-        """adds or subtracts frames number of frames"""
-        self.frames = self.frames + frames
-        
+        """adds or subtracts frames number of frames
+        """
+        self.frames += frames
+
     def sub_frames(self, frames):
-        """adds or subtracts frames number of frames"""
-        self.__add_timecode__(-frames)
-        
+        """adds or subtracts frames number of frames
+        """
+        self.add_frames(-frames)
+
     def mult_frames(self, frames):
-        """adds or subtracts frames number of frames"""
-        self.frames = self.frames * frames
-        
+        """multiply frames
+        """
+        self.frames *= frames
+
     def div_frames(self, frames):
         """adds or subtracts frames number of frames"""
         self.frames = self.frames / frames
-        
+
+    def __eq__(self, other):
+        """the overridden equality operator
+        """
+        if isinstance(other, Timecode):
+            return self.framerate == other.framerate and \
+                self.frames == other.frames
+        elif isinstance(other, str):
+            new_tc = Timecode(self.framerate, other)
+            return self.__eq__(new_tc)
+        elif isinstance(other, int):
+            return self.frames == other
+
     def __add__(self, other):
-        """returns new pytimecode object with added timecodes"""
-        if type(other) == PyTimeCode:
-            added_frames = self.frames + other.frames
-        elif type(other) == int:
-            added_frames = self.frames + other
+        """returns new Timecode instance with the given timecode or frames
+        added to this one
+        """
+        # duplicate current one
+        tc = Timecode(self.framerate, frames=self.frames)
+
+        if isinstance(other, Timecode):
+            tc.add_frames(other.frame_number)
+        elif isinstance(other, int):
+            tc.add_frames(other)
         else:
-            raise PyTimeCodeError('Type '+str(type(other))+' not supported for arithmetic.')
-        newtc = PyTimeCode(self.framerate, start_timecode=None, frames=added_frames, drop_frame=self.drop_frame)
-        return newtc
-        
+            raise TimecodeError(
+                'Type %s not supported for arithmetic.' %
+                other.__class__.__name__
+            )
+
+        return tc
+
     def __sub__(self, other):
-        """returns new pytimecode object with added timecodes"""
-        if type(other) == PyTimeCode:
-            subtracted_frames = self.frames - other.frames
-        elif type(other) == int:
-            subtracted_frames = self.frames - other
-        else:
-            raise PyTimeCodeError('Type '+str(type(other))+' not supported for arithmetic.')
-        newtc = PyTimeCode(self.framerate, start_timecode=None, frames=subtracted_frames, drop_frame=self.drop_frame)
-        return newtc
+        """returns new Timecode object with added timecodes"""
+        tc = Timecode(self.framerate, frames=self.frames)
         
+        if isinstance(other, Timecode):
+            tc.sub_frames(other.frame_number)
+        elif isinstance(other, int):
+            tc.sub_frames(other)
+        else:
+            raise TimecodeError(
+                'Type %s not supported for arithmetic.' %
+                other.__class__.__name__
+            )
+        return tc
+
     def __mul__(self, other):
-        """returns new pytimecode object with added timecodes"""
-        if type(other) == PyTimeCode:
-            mult_frames = self.frames * other.frames
-        elif type(other) == int:
-            mult_frames = self.frames * other
+        """returns new Timecode object with added timecodes"""
+        if isinstance(other, Timecode):
+            multiplied_frames = self.frames * other.frames
+        elif isinstance(other, int):
+            multiplied_frames = self.frames * other
         else:
-            raise PyTimeCodeError('Type '+str(type(other))+' not supported for arithmetic.')
-        newtc = PyTimeCode(self.framerate, start_timecode=None, frames=mult_frames, drop_frame=self.drop_frame)
-        return newtc 
-        
+            raise TimecodeError(
+                'Type %s not supported for arithmetic.' %
+                other.__class__.__name__
+            )
+        return Timecode(self.framerate, frames=multiplied_frames)
+
     def __div__(self, other):
-        """returns new pytimecode object with added timecodes"""
-        if type(other) == PyTimeCode:
+        """returns new Timecode object with added timecodes"""
+        if isinstance(other, Timecode):
             div_frames = self.frames / other.frames
-        elif type(other) == int:
-            div_frames = self.frames /other
+        elif isinstance(other, int):
+            div_frames = self.frames / other
         else:
-            raise PyTimeCodeError('Type '+str(type(other))+' not supported for arithmetic.')
-        newtc = PyTimeCode(self.framerate, start_timecode=None, frames=div_frames, drop_frame=self.drop_frame)
-        return newtc 
-    
-    def __repr__(self):
-        return self.make_timecode()
+            raise TimecodeError(
+                'Type %s not supported for arithmetic.' %
+                other.__class__.__name__
+            )
+        return Timecode(self.framerate, frames=div_frames)
+
+    def __iadd__(self, other):
+        return self.__add__(other)
+
+    def __isub__(self, other):
+        return self.__sub__(other)
         
-class PyTimeCodeError(Exception):
+    def __imul__(self, other):
+        return self.__mul__(other)
+        
+    def __idiv__(self, other):
+        return self.__div__(other)
+
+    def __repr__(self):
+        return self.format()
+
+    def __attrs__(self):
+        """Replaces format directives with values."""
+        return {
+            'H': self.hrs,
+            'M': self.mins,
+            'S': self.secs,
+            'f': self.frs,
+            'm': self.ms,
+        }
+        
+    def format(self, fmt=global_fmt):
+        """Format the stdout string.
+
+        The following directives can be embedded in the format string.
+        Format directives support padding, for example: "%04l".
+
+        +-----------+-------------------------------------+
+        | Directive | Meaning                             |
+        +===========+=====================================+
+        | ``%h``    | hours                      |
+        +-----------+-------------------------------------+
+        | ``%m``    | minutes                        |
+        +-----------+-------------------------------------+
+        | ``%s``    | seconds                     |
+        +-----------+-------------------------------------+
+        | ``%f``    | frames                  |
+        +-----------+-------------------------------------+
+        | ``%m``    | miliseconds               |
+        +-----------+-------------------------------------+
+
+        :param fmt: Format string. Default is '%4l %h%p%t %R'.
+
+        :return: Formatted string.
+        """
+        format_char_types = {
+            'H': 'i',
+            'M': 'i',
+            'S': 'i',
+            'f': 'i',
+            'm': 'i'
+        }
+
+        for m in format_re.finditer(fmt):
+            var = m.group('var')
+            pad = m.group('pad')
+            try:
+                fmt_char = format_char_types[var]
+            except KeyError as err:
+                raise FormatError("Bad directive: %%%s" % var)
+            _old = '%s%s' % (pad or '', var)
+            _new = '(%s)%s%s' % (var, pad or '', fmt_char)
+            fmt = fmt.replace(_old, _new)
+        return fmt % self.__attrs__()
+
+    @property
+    def hrs(self):
+        hrs, mins, secs, frs = self.frames_to_tc(self.frames)
+        return hrs
+
+    @property
+    def mins(self):
+        hrs, mins, secs, frs = self.frames_to_tc(self.frames)
+        return mins
+
+    @property
+    def secs(self):
+        hrs, mins, secs, frs = self.frames_to_tc(self.frames)
+        return secs
+
+    @property
+    def frs(self):
+        hrs, mins, secs, frs = self.frames_to_tc(self.frames)
+        return frs
+
+    @property
+    def frame_number(self):
+        """returns the 0 based frame number of the current timecode instance
+        """
+        return self.frames - 1
+
+    @property
+    def ms(self):
+        """returns the 0 based frame number of the current timecode instance
+        """
+        hrs, mins, secs, frs = self.frames_to_tc(self.frames)
+        return int(frs / float(self.framerate) * 100000)
+
+
+class TimecodeError(Exception):
+    """Raised when an error occurred in timecode calculation
+    """
     pass
+
+
+if __name__ == '__main__':
+    a = Timecode('29.97', '00:00:01:20')
+    b = Timecode('29.97', '00:00:00:15')
+    print a.format(ffmpeg_fmt)
